@@ -5,20 +5,23 @@ from typing import Iterator, List
 import os
 import cv2
 import numpy as np
-import supervision as sv
+import supervision as sv  # type: ignore
 from tqdm import tqdm
 from ultralytics import YOLO
+
+PARENT_DIR = os.path.dirname(os.path.abspath(__file__))
+PLAYER_DETECTION_MODEL_PATH = os.path.join(PARENT_DIR, 'data/football-player-detection.pt')
+PITCH_DETECTION_MODEL_PATH = os.path.join(PARENT_DIR, 'data/football-pitch-detection.pt')
+BALL_DETECTION_MODEL_PATH = os.path.join(PARENT_DIR, 'data/football-ball-detection.pt')
+
 
 from sports.annotators.soccer import draw_pitch, draw_points_on_pitch
 from sports.common.ball import BallTracker, BallAnnotator
 from sports.common.team import TeamClassifier
 from sports.common.view import ViewTransformer
 from sports.configs.soccer import SoccerPitchConfiguration
+from sports.common.possession import PossessionTracker
 
-PARENT_DIR = os.path.dirname(os.path.abspath(__file__))
-PLAYER_DETECTION_MODEL_PATH = os.path.join(PARENT_DIR, 'data/football-player-detection.pt')
-PITCH_DETECTION_MODEL_PATH = os.path.join(PARENT_DIR, 'data/football-pitch-detection.pt')
-BALL_DETECTION_MODEL_PATH = os.path.join(PARENT_DIR, 'data/football-ball-detection.pt')
 
 BALL_CLASS_ID = 0
 GOALKEEPER_CLASS_ID = 1
@@ -80,6 +83,8 @@ class Mode(Enum):
     PLAYER_TRACKING = 'PLAYER_TRACKING'
     TEAM_CLASSIFICATION = 'TEAM_CLASSIFICATION'
     RADAR = 'RADAR'
+    BALL_POSSESSION = 'BALL_POSSESSION'
+    
 
 
 def get_crops(frame: np.ndarray, detections: sv.Detections) -> List[np.ndarray]:
@@ -128,6 +133,243 @@ def resolve_goalkeepers_team_id(
         goalkeepers_team_id.append(0 if dist_0 < dist_1 else 1)
     return np.array(goalkeepers_team_id)
 
+def calculate_ball_possession_distance(
+    ball_detections: sv.Detections,
+    players: sv.Detections,
+    players_team_id: np.ndarray,
+    goalkeepers: sv.Detections,
+    goalkeepers_team_id: np.ndarray,
+    threshold: float = 80.0
+) -> int:
+    """
+    Calculate ball possession based on distance to closest player.
+    
+    Returns:
+        - 0: Team 0 possession
+        - 1: Team 1 possession  
+        - None: No possession (contested/free ball)
+    """
+    if len(ball_detections) == 0:
+        return None
+    
+    ball_xy = ball_detections.get_anchors_coordinates(sv.Position.CENTER)[0]
+    
+    # Combine all field players
+    all_players = []
+    all_team_ids = []
+    
+    if len(players) > 0:
+        all_players.append(players)
+        all_team_ids.extend(players_team_id.tolist())
+    
+    if len(goalkeepers) > 0:
+        all_players.append(goalkeepers)
+        all_team_ids.extend(goalkeepers_team_id.tolist())
+    
+    if not all_players:
+        return None
+    
+    merged_players = sv.Detections.merge(all_players)
+    players_xy = merged_players.get_anchors_coordinates(sv.Position.CENTER)
+    
+    # Calculate distances
+    distances = np.linalg.norm(players_xy - ball_xy, axis=1)
+    closest_idx = np.argmin(distances)
+    closest_distance = distances[closest_idx]
+    
+    # Assign possession if within threshold
+    if closest_distance <= threshold:
+        return all_team_ids[closest_idx]
+    
+    return None 
+
+def run_ball_possession(source_video_path: str, device: str) -> Iterator[np.ndarray]:
+    # Initialize models (similar to RADAR mode)
+    player_detection_model = YOLO(PLAYER_DETECTION_MODEL_PATH).to(device=device)
+    ball_detection_model = YOLO(BALL_DETECTION_MODEL_PATH).to(device=device)
+    #pitch_detection_model = YOLO(PITCH_DETECTION_MODEL_PATH).to(device=device)
+    
+    frame_generator = sv.get_video_frames_generator(source_path=source_video_path)
+    ball_tracker = BallTracker(buffer_size=5)
+    ball_annotator = BallAnnotator(radius=6, buffer_size=10)
+    
+
+    def callback(image_slice: np.ndarray) -> sv.Detections:
+        result = ball_detection_model(image_slice, imgsz=640, verbose=False)[0]
+        return sv.Detections.from_ultralytics(result)
+
+    slicer = sv.InferenceSlicer(
+        callback=callback,
+        slice_wh=(640, 640),
+    )
+
+    crops = []
+    for frame in tqdm(frame_generator, desc='collecting crops'):
+        result = player_detection_model(frame, imgsz=1280, verbose=False)[0]
+        detections = sv.Detections.from_ultralytics(result)
+        crops += get_crops(frame, detections[detections.class_id == PLAYER_CLASS_ID])
+
+    team_classifier = TeamClassifier(device=device)
+    team_classifier.fit(crops)
+
+    frame_generator = sv.get_video_frames_generator(source_path=source_video_path)
+    tracker = sv.ByteTrack(minimum_consecutive_frames=3)
+
+    possession_tracker = PossessionTracker(smoothing_window=5, confidence_threshold=0.6)
+    possession_statistics = {0: 0, 1: 0, None: 0}
+    ball_velocity = np.array([0, 0])
+    prev_ball_pos = None
+
+    for frame_count, frame in enumerate(frame_generator):
+
+        ball_detections = slicer(frame).with_nms(threshold=0.5)
+        if len(ball_detections) == 0:
+            ball_detections = ball_tracker.predict(BALL_CLASS_ID)
+        ball_detections = ball_tracker.update(ball_detections)
+        annotated_frame = frame.copy()
+        annotated_frame = ball_annotator.annotate(annotated_frame, ball_detections)
+
+        # result = pitch_detection_model(frame, verbose=False)[0]
+        # keypoints = sv.KeyPoints.from_ultralytics(result)
+        result = player_detection_model(frame, imgsz=1280, verbose=False)[0]
+        detections = sv.Detections.from_ultralytics(result)
+        detections = tracker.update_with_detections(detections)
+
+        players = detections[detections.class_id == PLAYER_CLASS_ID]
+        crops = get_crops(frame, players)
+        players_team_id = team_classifier.predict(crops)
+
+        goalkeepers = detections[detections.class_id == GOALKEEPER_CLASS_ID]
+        goalkeepers_team_id = resolve_goalkeepers_team_id(
+            players, players_team_id, goalkeepers)
+
+        referees = detections[detections.class_id == REFEREE_CLASS_ID]
+
+        detections = sv.Detections.merge([players, goalkeepers, referees])
+        color_lookup = np.array(
+            players_team_id.tolist() +
+            goalkeepers_team_id.tolist() +
+            [REFEREE_CLASS_ID] * len(referees)
+        )
+        labels = [str(tracker_id) for tracker_id in detections.tracker_id]
+
+        annotated_frame = ELLIPSE_ANNOTATOR.annotate(
+            annotated_frame, detections, custom_color_lookup=color_lookup)
+        annotated_frame = ELLIPSE_LABEL_ANNOTATOR.annotate(
+            annotated_frame, detections, labels,
+            custom_color_lookup=color_lookup)
+
+        # h, w, _ = frame.shape
+        # radar = render_radar_with_ball(detections, ball_detections, keypoints, color_lookup)
+        # radar = sv.resize_image(radar, (w // 2, h // 2))
+        # radar_h, radar_w, _ = radar.shape
+        # rect = sv.Rect(
+        #     x=w // 2 - radar_w // 2,
+        #     y=h - radar_h,
+        #     width=radar_w,
+        #     height=radar_h
+        # )
+        # annotated_frame = sv.draw_image(annotated_frame, radar, opacity=0.5, rect=rect)
+        
+        possession_result = calculate_ball_possession_distance(
+            ball_detections=ball_detections,
+            players=players,
+            players_team_id=players_team_id,
+            goalkeepers=goalkeepers,
+            goalkeepers_team_id=goalkeepers_team_id,
+            threshold=30.0
+        )
+
+        
+        possession_dict = {
+            "team": possession_result,
+            "confidence": 1.0 if possession_result is not None else 0.0,
+            "method": "distance_based",
+            "duration": 0  # Add this field that PossessionTracker expects
+        }
+
+        stable_possession = possession_tracker.update(possession_dict, frame_count)
+        possession_statistics[stable_possession["team"]] += 1
+
+        annotated_frame = ball_annotator.annotate(
+                    annotated_frame, 
+                    ball_detections, 
+                    possession_team=stable_possession["team"]
+                )
+
+
+        total_frames = sum(possession_statistics.values())
+        percentages = {team: (count/total_frames)*100 for team, count in possession_statistics.items()}
+
+        possession_text = f"No Possession (Contested)"
+        if stable_possession["team"] == 0:
+            possession_text = f"Team 0 Possession ({stable_possession['confidence']:.1f})"
+        elif stable_possession["team"] == 1:
+            possession_text = f"Team 1 Possession ({stable_possession['confidence']:.1f})"
+
+        # Add possession info to frame
+        cv2.putText(annotated_frame, possession_text, (20, 40), 
+           cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+        cv2.putText(annotated_frame, f"Team 0: {percentages[0]:.1f}% | Team 1: {percentages[1]:.1f}%", 
+                (20, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+        cv2.putText(annotated_frame, f"Duration: {stable_possession['duration']} frames", 
+                (20, 110), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 200, 200), 2)
+
+        yield annotated_frame
+
+
+def render_radar_with_ball(
+    detections: sv.Detections,
+    ball_detections: sv.Detections,
+    keypoints: sv.KeyPoints,
+    color_lookup: np.ndarray
+) -> np.ndarray:
+    """
+    Render radar view with players and ball position.
+    """
+    # Check if we have valid keypoints for transformation
+    if len(keypoints.xy[0]) == 0:
+        return draw_pitch(config=CONFIG)
+    
+    mask = (keypoints.xy[0][:, 0] > 1) & (keypoints.xy[0][:, 1] > 1)
+    if not mask.any():
+        return draw_pitch(config=CONFIG)
+    
+    transformer = ViewTransformer(
+        source=keypoints.xy[0][mask].astype(np.float32),
+        target=np.array(CONFIG.vertices)[mask].astype(np.float32)
+    )
+    
+    # Transform player positions
+    xy = detections.get_anchors_coordinates(anchor=sv.Position.BOTTOM_CENTER)
+    transformed_xy = transformer.transform_points(points=xy)
+
+    # Create radar background
+    radar = draw_pitch(config=CONFIG)
+    
+    # Draw players by team
+    radar = draw_points_on_pitch(
+        config=CONFIG, xy=transformed_xy[color_lookup == 0],
+        face_color=sv.Color.from_hex(COLORS[0]), radius=20, pitch=radar)
+    radar = draw_points_on_pitch(
+        config=CONFIG, xy=transformed_xy[color_lookup == 1],
+        face_color=sv.Color.from_hex(COLORS[1]), radius=20, pitch=radar)
+    radar = draw_points_on_pitch(
+        config=CONFIG, xy=transformed_xy[color_lookup == 2],
+        face_color=sv.Color.from_hex(COLORS[2]), radius=20, pitch=radar)
+    radar = draw_points_on_pitch(
+        config=CONFIG, xy=transformed_xy[color_lookup == 3],
+        face_color=sv.Color.from_hex(COLORS[3]), radius=20, pitch=radar)
+    
+    # Draw ball if detected
+    if len(ball_detections) > 0:
+        ball_xy = ball_detections.get_anchors_coordinates(anchor=sv.Position.CENTER)
+        transformed_ball_xy = transformer.transform_points(points=ball_xy)
+        radar = draw_points_on_pitch(
+            config=CONFIG, xy=transformed_ball_xy,
+            face_color=sv.Color.from_hex('#FFFFFF'), radius=15, pitch=radar)  # White ball
+    
+    return radar
 
 def render_radar(
     detections: sv.Detections,
@@ -226,7 +468,6 @@ def run_ball_detection(source_video_path: str, device: str) -> Iterator[np.ndarr
 
     slicer = sv.InferenceSlicer(
         callback=callback,
-        overlap_filter_strategy=sv.OverlapFilter.NONE,
         slice_wh=(640, 640),
     )
 
@@ -405,18 +646,18 @@ def main(source_video_path: str, target_video_path: str, device: str, mode: Mode
     elif mode == Mode.RADAR:
         frame_generator = run_radar(
             source_video_path=source_video_path, device=device)
+    elif mode == Mode.BALL_POSSESSION:
+        frame_generator = run_ball_possession(
+            source_video_path=source_video_path, device=device)
     else:
         raise NotImplementedError(f"Mode {mode} is not implemented.")
 
     video_info = sv.VideoInfo.from_video_path(source_video_path)
     with sv.VideoSink(target_video_path, video_info) as sink:
-        for frame in frame_generator:
+        for frame in tqdm(frame_generator, desc=f"Processing {mode.value}"):
             sink.write_frame(frame)
-
-            cv2.imshow("frame", frame)
-            if cv2.waitKey(1) & 0xFF == ord("q"):
-                break
-        cv2.destroyAllWindows()
+    
+    print(f"✅ Video saved to: {target_video_path}")
 
 
 if __name__ == '__main__':
