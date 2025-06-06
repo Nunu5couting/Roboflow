@@ -136,59 +136,95 @@ def resolve_goalkeepers_team_id(
 def calculate_ball_possession_distance(
     ball_detections: sv.Detections,
     players: sv.Detections,
-    players_team_id: np.ndarray,
+    players_team_id: np.ndarray, 
     goalkeepers: sv.Detections,
     goalkeepers_team_id: np.ndarray,
-    threshold: float = 80.0
+    keypoints: sv.KeyPoints,
+    threshold: float = 500.0
 ) -> int:
     """
-    Calculate ball possession based on distance to closest player.
+    Calculate ball possession based on distance to closest player or goalkeeper.
     
     Returns:
         - 0: Team 0 possession
         - 1: Team 1 possession  
         - None: No possession (contested/free ball)
     """
+    # Check if we have valid keypoints for transformation
+    if len(keypoints.xy[0]) == 0:
+        return None
+    
+    mask = (keypoints.xy[0][:, 0] > 1) & (keypoints.xy[0][:, 1] > 1)
+    if not mask.any():
+        return None
+    
+    transformer = ViewTransformer(
+        source=keypoints.xy[0][mask].astype(np.float32),
+        target=np.array(CONFIG.vertices)[mask].astype(np.float32)
+    )
+    
+    # Check for ball detection
     if len(ball_detections) == 0:
         return None
-    
-    ball_xy = ball_detections.get_anchors_coordinates(sv.Position.CENTER)[0]
-    
-    # Combine all field players
-    all_players = []
+        
+    ball_xy = ball_detections.get_anchors_coordinates(anchor=sv.Position.CENTER)
+    ball_xy = transformer.transform_points(points=ball_xy)
+
+    # Combine players and goalkeepers
+    all_players_xy = []
     all_team_ids = []
-    
+
+    # Add players
     if len(players) > 0:
-        all_players.append(players)
-        all_team_ids.extend(players_team_id.tolist())
-    
+        players_xy = players.get_anchors_coordinates(anchor=sv.Position.BOTTOM_CENTER)
+        players_xy = transformer.transform_points(points=players_xy)
+        all_players_xy.extend(players_xy)
+        all_team_ids.extend(players_team_id)
+
+    # Add goalkeepers 
     if len(goalkeepers) > 0:
-        all_players.append(goalkeepers)
-        all_team_ids.extend(goalkeepers_team_id.tolist())
-    
-    if not all_players:
+        goalkeepers_xy = goalkeepers.get_anchors_coordinates(anchor=sv.Position.BOTTOM_CENTER)
+        goalkeepers_xy = transformer.transform_points(points=goalkeepers_xy)
+        all_players_xy.extend(goalkeepers_xy)
+        all_team_ids.extend(goalkeepers_team_id)
+
+    if not all_players_xy:
+        return None
+
+    # Convert to numpy arrays
+    all_players_xy = np.array(all_players_xy)
+    all_team_ids = np.array(all_team_ids)
+
+    # 🔍 DEBUG: Check array sizes match
+    print(f"Debug: all_players_xy shape: {all_players_xy.shape}")
+    print(f"Debug: all_team_ids shape: {all_team_ids.shape}")
+
+    if len(all_team_ids) == 0:
+        print("❌ No team IDs available")
+        return None
+
+    if len(all_players_xy) != len(all_team_ids):
+        print(f"❌ Mismatch: {len(all_players_xy)} players vs {len(all_team_ids)} team IDs")
         return None
     
-    merged_players = sv.Detections.merge(all_players)
-    players_xy = merged_players.get_anchors_coordinates(sv.Position.CENTER)
-    
-    # Calculate distances
-    distances = np.linalg.norm(players_xy - ball_xy, axis=1)
+    # Calculate distances to ball
+    distances = np.linalg.norm(all_players_xy - ball_xy, axis=1)
     closest_idx = np.argmin(distances)
+    print(f"Debug: Closest player index: {closest_idx}, Distance: {distances[closest_idx]}")
     closest_distance = distances[closest_idx]
     
     # Assign possession if within threshold
     if closest_distance <= threshold:
         return all_team_ids[closest_idx]
     
-    return None 
+    return None
 
 def run_ball_possession(source_video_path: str, device: str) -> Iterator[np.ndarray]:
     # Initialize models (similar to RADAR mode)
     player_detection_model = YOLO(PLAYER_DETECTION_MODEL_PATH).to(device=device)
     ball_detection_model = YOLO(BALL_DETECTION_MODEL_PATH).to(device=device)
-    #pitch_detection_model = YOLO(PITCH_DETECTION_MODEL_PATH).to(device=device)
-    
+    pitch_detection_model = YOLO(PITCH_DETECTION_MODEL_PATH).to(device=device)
+
     frame_generator = sv.get_video_frames_generator(source_path=source_video_path)
     ball_tracker = BallTracker(buffer_size=5)
     ball_annotator = BallAnnotator(radius=6, buffer_size=10)
@@ -229,6 +265,9 @@ def run_ball_possession(source_video_path: str, device: str) -> Iterator[np.ndar
         annotated_frame = frame.copy()
         annotated_frame = ball_annotator.annotate(annotated_frame, ball_detections)
 
+        pitch_result = pitch_detection_model(frame, verbose=False)[0]
+        keypoints = sv.KeyPoints.from_ultralytics(pitch_result)
+
         # result = pitch_detection_model(frame, verbose=False)[0]
         # keypoints = sv.KeyPoints.from_ultralytics(result)
         result = player_detection_model(frame, imgsz=1280, verbose=False)[0]
@@ -245,41 +284,16 @@ def run_ball_possession(source_video_path: str, device: str) -> Iterator[np.ndar
 
         referees = detections[detections.class_id == REFEREE_CLASS_ID]
 
-        detections = sv.Detections.merge([players, goalkeepers, referees])
-        color_lookup = np.array(
-            players_team_id.tolist() +
-            goalkeepers_team_id.tolist() +
-            [REFEREE_CLASS_ID] * len(referees)
-        )
-        labels = [str(tracker_id) for tracker_id in detections.tracker_id]
-
-        annotated_frame = ELLIPSE_ANNOTATOR.annotate(
-            annotated_frame, detections, custom_color_lookup=color_lookup)
-        annotated_frame = ELLIPSE_LABEL_ANNOTATOR.annotate(
-            annotated_frame, detections, labels,
-            custom_color_lookup=color_lookup)
-
-        # h, w, _ = frame.shape
-        # radar = render_radar_with_ball(detections, ball_detections, keypoints, color_lookup)
-        # radar = sv.resize_image(radar, (w // 2, h // 2))
-        # radar_h, radar_w, _ = radar.shape
-        # rect = sv.Rect(
-        #     x=w // 2 - radar_w // 2,
-        #     y=h - radar_h,
-        #     width=radar_w,
-        #     height=radar_h
-        # )
-        # annotated_frame = sv.draw_image(annotated_frame, radar, opacity=0.5, rect=rect)
-        
+                
         possession_result = calculate_ball_possession_distance(
             ball_detections=ball_detections,
             players=players,
-            players_team_id=players_team_id,
+            players_team_id=players_team_id,  # ✅ FIX: Use players_team_id, not goalkeepers_team_id
             goalkeepers=goalkeepers,
             goalkeepers_team_id=goalkeepers_team_id,
-            threshold=30.0
+            keypoints=keypoints,
+            threshold=500.0
         )
-
         
         possession_dict = {
             "team": possession_result,
@@ -291,12 +305,30 @@ def run_ball_possession(source_video_path: str, device: str) -> Iterator[np.ndar
         stable_possession = possession_tracker.update(possession_dict, frame_count)
         possession_statistics[stable_possession["team"]] += 1
 
+        print(f"Frame {frame_count}: Possession - {stable_possession['team']} "
+              f"(Confidence: {stable_possession['confidence']:.2f}, "
+              f"Duration: {stable_possession['duration']})")
+
+        detections = sv.Detections.merge([players, goalkeepers, referees])
+        color_lookup = np.array(
+            players_team_id.tolist() +
+            goalkeepers_team_id.tolist() +
+            [REFEREE_CLASS_ID] * len(referees)
+        )
+        labels = [str(tracker_id) for tracker_id in detections.tracker_id]
+
+
+        annotated_frame = ELLIPSE_ANNOTATOR.annotate(
+            annotated_frame, detections, custom_color_lookup=color_lookup)
+        annotated_frame = ELLIPSE_LABEL_ANNOTATOR.annotate(
+            annotated_frame, detections, labels,
+            custom_color_lookup=color_lookup)
+
         annotated_frame = ball_annotator.annotate(
                     annotated_frame, 
                     ball_detections, 
                     possession_team=stable_possession["team"]
                 )
-
 
         total_frames = sum(possession_statistics.values())
         percentages = {team: (count/total_frames)*100 for team, count in possession_statistics.items()}
