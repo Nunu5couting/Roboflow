@@ -241,7 +241,7 @@ def run_analytics(source_video_path: str, device: str) -> Iterator[np.ndarray]:
         
         possession_result = possession_tracker.calculate_ball_possession_distance(
             ball_detections, players, players_team_id, goalkeepers, 
-            goalkeepers_team_id, keypoints, CONFIG.vertices, all_tracker_ids)
+            goalkeepers_team_id, keypoints, CONFIG, all_tracker_ids)
         team_possession, closest_idx, distance = possession_result if possession_result else (None, None, None)
 
         possession_dict = {"team": team_possession, "confidence": 1.0 if team_possession is not None else 0.0,
