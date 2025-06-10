@@ -8,17 +8,35 @@
 
 ## 👋 hello
 
-In sports, every centimeter and every second matter. That's why Roboflow decided to use sports as a testing ground to push our object detection, image segmentation, keypoint detection, and foundational models to their limits. This repository contains reusable tools that can be applied in sports and beyond.
+This is a specialized fork of the official Roboflow sports repository, enhanced with professional-grade football analytics. Building upon robust computer vision foundations, this implementation transforms raw detections into actionable tactical insights used by modern football analysis.
 
-## 🥵 challenges
+## 🎯 Key Analytics Features
+Advanced Metrics Pipeline
 
-Are you also a fan of computer vision and sports?  We welcome contributions from anyone who shares our passion! Together, we can build powerful open-source tools for sports analytics. Here are the main challenges we're looking to tackle:
+📊 Real-Time Ball Possession Analysis - Precise team possession tracking with confidence scoring
+⚽ Intelligent Pass Detection - Automated counting of successful passes per team with turnover differentiation
+🔄 Dynamic Possession Flow - Live tracking of possession changes and momentum shifts throughout matches
 
-- **Ball tracking:** Tracking the ball is extremely difficult due to its small size and rapid movements, especially in high-resolution videos.
-- **Reading jersey numbers:** Accurately reading player jersey numbers is often hampered by blurry videos, players turning away, or other objects obscuring the numbers.
-- **Player tracking:** Maintaining consistent player identification throughout a game is a challenge due to frequent occlusions caused by other players or objects on the field.
-- **Player re-identification:** Re-identifying players who have left and re-entered the frame is tricky, especially with moving cameras or when players are visually similar.
-- **Camera calibration:** Accurately calibrating camera views is crucial for extracting advanced statistics like player speed and distance traveled. This is a complex task due to the dynamic nature of sports and varying camera angles.
+## 🎬 Demo
+
+
+## 🧠 Implementation Architecture
+### Perspective-Corrected Distance Analysis
+
+- 2D Field Mapping: Eliminates camera perspective distortion using detected pitch keypoints
+- Calibrated Measurements: Converts pixel distances to real-world field coordinates
+- Multi-Player Evaluation: Simultaneous distance calculation across all players and goalkeepers
+
+### Intelligent Possession Algorithm
+
+- Distance-Based Core: Determines possession using proximity analysis between ball and players
+- Temporal Smoothing: 3-frame smoothing window eliminates detection noise and false possession changes
+
+### Advanced Pass Recognition
+
+- Team Continuity Logic: Distinguishes successful passes from turnovers by monitoring team possession consistency
+- Player Transition Detection: Tracks ball movement between teammates using persistent player IDs
+- Statistical Validation: Filters false positives through temporal analysis and possession stability checks
 
 ## 💻 install
 
