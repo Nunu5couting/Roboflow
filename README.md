@@ -45,7 +45,7 @@ We don't have a Python package yet. Install from source in a
 [**Python>=3.8**](https://www.python.org/) environment.
 
 ```bash
-pip install git+https://github.com/roboflow/sports.git
+pip install git+https://github.com/KomisD/sports.git
 ```
 
 ## ⚽ datasets
@@ -58,13 +58,6 @@ pip install git+https://github.com/roboflow/sports.git
 | 🏀 basketball court keypoint detection | [![Download Dataset](https://app.roboflow.com/images/download-dataset-badge.svg)](https://universe.roboflow.com/roboflow-jvuqo/basketball-court-detection-2)      |
 | 🏀 basketball jersey numbers ocr       | [![Download Dataset](https://app.roboflow.com/images/download-dataset-badge.svg)](https://universe.roboflow.com/roboflow-jvuqo/basketball-jersey-numbers-ocr)     |
 
-
-Visit [Roboflow Universe](https://universe.roboflow.com/) and explore other sport-related datasets.
-
-## 🔥 Official demos
+## 🔥 Official demo
 
 https://github.com/roboflow/sports/assets/26109316/7ad414dd-cc4e-476d-9af3-02dfdf029205
-
-## 🏆 contribution
-
-We love your input! [Let us know](https://github.com/roboflow/sports/issues) what else we should build!
