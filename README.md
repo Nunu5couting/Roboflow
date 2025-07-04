@@ -10,12 +10,13 @@
 
 This is a specialized fork of the official Roboflow sports repository, enhanced with professional-grade football analytics. Building upon robust computer vision foundations, this implementation transforms raw detections into actionable tactical insights used by modern football analysis.
 
-## 🎯 Key Analytics Features
+## 🎯 Key Analytics Features Added
 Advanced Metrics Pipeline
 
-📊 Real-Time Ball Possession Analysis - Precise team possession tracking with confidence scoring
-⚽ Intelligent Pass Detection - Automated counting of successful passes per team with turnover differentiation
-🔄 Dynamic Possession Flow - Live tracking of possession changes and momentum shifts throughout matches
+- 📊 Real-Time Ball Possession Analysis - Precise team possession tracking with confidence scoring
+- ⚽ Intelligent Pass Detection - Automated counting of successful passes per team with turnover differentiation
+- 🔄 Dynamic Possession Flow - Live tracking of possession changes and momentum shifts throughout matches
+- ⏩ Ball Speed Calculation - Live tracking of the ball speed
 
 ## 🎬 Demo
 
