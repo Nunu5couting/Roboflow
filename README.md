@@ -18,7 +18,7 @@ Advanced Metrics Pipeline
 - 🔄 Dynamic Possession Flow - Live tracking of possession changes and momentum shifts throughout matches
 - ⏩ Ball Speed Calculation - Live tracking of the ball speed
 
-## 🎬 Demo
+## 🎬 Analytics Feature Demo
 
 
 ## 🧠 Implementation Architecture
